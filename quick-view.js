@@ -1,12 +1,14 @@
-import {transferCue} from './transfer.js';
+import {dialogueFor} from './dialogue.js';
 const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const play = text => `<button class="sound" data-action="sound" data-text="${esc(text)}" aria-label="Прослушать: ${esc(text)}" title="Прослушать">▶</button>`;
-const names = {listen:'Послушай',repeat:'Повтори',recall:'Ответь без текста',write:'Напиши ответ',transfer:'Примени в ситуации',rate:'Оцени попытку'};
+const names = {listen:'Послушай',repeat:'Повтори',recall:'Ответь без текста',write:'Напиши ответ',transfer:'Новая ситуация',followup:'Продолжи диалог',rate:'Оцени попытку'};
 
 export function quickMarkup(lesson, session, rate, dueAt) {
   const {mode,steps,step,id} = session;
   const current = steps[step];
-  const transfer = transferCue(lesson);
+  const dialogue=dialogueFor(lesson);
+  const transfer=dialogue?.[1];
+  const followup=dialogue?.[2];
   const ratingLocked = session.hintUsed && Boolean(session.retrievalRating);
   const chunks = lesson.model.split(/(?<=[.!?])\s+/).filter(Boolean);
   const speed = [0.72, 0.88, 1].map(value => `<button class="btn quiet" data-action="quick-speed" data-rate="${value}" aria-pressed="${rate===value}">${value===0.72?'Медленно':value===1?'Обычно':'Спокойно'}</button>`).join('');
@@ -40,13 +42,21 @@ export function quickMarkup(lesson, session, rate, dueAt) {
     <div class="quick-cue">${lesson.phrases.slice(0,2).map(phrase=>`<span lang="en">${esc(phrase.en)}</span>`).join(' · ')}</div>
     <p class="note">Текст остаётся в текущем занятии. Приложение не проверяет его правильность автоматически.</p>`
   : current === 'transfer' ? `
-    <p class="eyebrow">ПРИМЕНИ В НОВОЙ СИТУАЦИИ</p><h2>Скажи иначе</h2>
+    <p class="eyebrow">ДИАЛОГ · РЕПЛИКА 2 ИЗ 3</p><h2>Ответь в новой ситуации</h2>
     <div class="quick-prompt"><small>Новая реплика собеседника</small><p lang="en">${esc(transfer?.partner||lesson.partner)}</p>${play(transfer?.partner||lesson.partner)}</div>
-    <p class="quick-cue">${esc(transfer?.instruction||lesson.speaking)} Произнеси ответ без чтения.</p>
-    ${session.written?`<details><summary>Мой письменный ответ</summary><p lang="en">${esc(session.written)}</p></details>`:''}`
+    <p class="quick-cue">${esc(transfer?.instruction||lesson.speaking)} Произнеси ответ без чтения. Собеседник затем продолжит разговор.</p>`
+  : current === 'followup' ? `
+    <p class="eyebrow">ДИАЛОГ · РЕПЛИКА 3 ИЗ 3</p><h2>Продолжи разговор</h2>
+    <div class="quick-prompt"><small>Собеседник продолжает</small><p lang="en">${esc(followup?.partner||lesson.partner)}</p>${play(followup?.partner||lesson.partner)}</div>
+    <p class="quick-cue">${esc(followup?.instruction||lesson.speaking)} Ответь вслух, опираясь на свои слова, затем оцени обе новые реплики.</p>
+    <div class="quick-feedback" role="group" aria-label="Самооценка диалога в новой ситуации">
+      <button class="btn" data-action="quick-transfer-rate" data-rating="independent" aria-pressed="${session.transferRating==='independent'}">Обе без подсказки</button>
+      <button class="btn quiet" data-action="quick-transfer-rate" data-rating="assisted" aria-pressed="${session.transferRating==='assisted'}">С подсказкой</button>
+      <button class="btn quiet" data-action="quick-transfer-rate" data-rating="again" aria-pressed="${session.transferRating==='again'}">Пока не получилось</button>
+    </div><p class="note">Оцени ответ в новых условиях отдельно от первого ответа. Это твоя самооценка; сайт не проверяет речь автоматически.</p>`
   : session.reviewFirst ? `<p class="eyebrow">ЗАКРЕПЛЕНИЕ</p><h2>Вернёмся к ответу позже</h2><p>Первая попытка до образца: ${session.retrievalRating==='independent'?'вспомнил сам':session.retrievalRating==='assisted'?'с подсказкой':'пока не вспомнил'}. Повторная практика после подсказки тоже полезна.</p><button class="btn" data-action="quick-rate" data-rating="${esc(session.retrievalRating||'')}" ${session.retrievalRating?'':'disabled'}>Сохранить самопроверку</button><p class="note">Срок следующего повторения рассчитан по первой попытке, а не по количеству прослушиваний образца.</p>`
   : `<p class="eyebrow">ТВОЯ ОЦЕНКА</p><h2>Что получилось?</h2>
-    <p>Вспомни ответ на вопрос <span lang="en">${esc(mode>=10?transfer?.partner||lesson.partner:lesson.partner)}</span>. Оцени именно последнюю устную попытку.</p>
+    <p>Вспомни свой первый ответ на вопрос <span lang="en">${esc(lesson.partner)}</span>. Оцени его отдельно от новых реплик диалога.</p>
     <div class="quick-feedback" role="group" aria-label="Самооценка ответа">
       <button class="btn" data-action="quick-rate" data-rating="independent" ${session.hintUsed?'disabled':''}>Сказал без текста</button>
       <button class="btn quiet" data-action="quick-rate" data-rating="assisted">Понадобилась подсказка</button>
@@ -61,9 +71,9 @@ export function quickMarkup(lesson, session, rate, dueAt) {
   return `<div class="quick-grid"><article class="panel quick-panel" tabindex="-1" aria-label="${session.completed?'Практика завершена':`Шаг ${step+1} из ${steps.length}: ${names[current]}`}">
     <div class="quick-steps" aria-label="Шаги практики">${steps.map((name,index)=>`<span class="quick-step ${index<step?'done':''} ${index===step?'current':''}" ${index===step?'aria-current="step"':''}>${index+1}. ${names[name]}</span>`).join('')}</div>
     ${session.completed?result:stage}
-    ${!session.completed&&current!=='rate'?`<div class="btn-row" style="margin-top:24px"><button class="btn" data-action="quick-next" ${session.reviewFirst&&current==='recall'&&!session.retrievalRating?'disabled':''}>${current==='recall'?(session.reviewFirst?'Сравнить с образцом →':'Я ответил вслух →'):'Дальше →'}</button></div>`:''}
+    ${!session.completed&&current!=='rate'?`<div class="btn-row" style="margin-top:24px"><button class="btn" data-action="quick-next" ${(session.reviewFirst&&current==='recall'&&!session.retrievalRating)||(current==='followup'&&!session.transferRating)?'disabled':''}>${current==='recall'?(session.reviewFirst?'Сравнить с образцом →':'Я ответил вслух →'):'Дальше →'}</button></div>`:''}
   </article><aside class="panel"><p class="eyebrow">ЛИЧНЫЙ МАРШРУТ</p><h3>${esc(lesson.title)}</h3><p>${esc(lesson.goal)}</p>
-    <p class="note">Режим ${mode} мин: ${mode===2?'слушай, повтори, ответь':mode===5?'добавь письменный ответ':'добавь письменный ответ и новую ситуацию'}.</p>
+    <p class="note">Режим ${mode} мин: ${mode===2?'слушай, повтори, ответь':mode===5?'добавь письменный ответ':'добавь письменный ответ и разговор из трёх реплик'}.</p>
     <div class="quick-modes" role="group" aria-label="Длительность практики">${[2,5,10].map(value=>`<a class="btn quiet" href="#quick/${esc(id)}/${value}" ${value===mode?'aria-current="page"':''}>${value} мин</a>`).join('')}</div>
     <p class="note">Для закрепления вернись к ответу после паузы. При следующем открытии тренажёр покажет, что пора повторить.</p></aside></div>`;
 }

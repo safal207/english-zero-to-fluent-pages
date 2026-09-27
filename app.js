@@ -1,14 +1,15 @@
 import {levels,lessons,phraseMap} from './curriculum.js';
-import {LEVEL_IDS,freshState,localDate,correctAnswer,scheduleCard,dueCards,streak,validateState} from './core.js';
+import {DAY,LEVEL_IDS,freshState,localDate,correctAnswer,scheduleCard,dueCards,streak,validateState} from './core.js';
 import {QUICK_MODES,quickSteps,resumeQuickSession,selectFocus,recordPractice} from './practice.js';
 import {quickMarkup} from './quick-view.js';
-import {MAX_PHRASES_PER_ADD,parsePersonalPhrases,markDialogueDone,ratePersonalPhrase} from './personal.js';
+import {MAX_PHRASES_PER_ADD,parsePersonalPhrases,personalDialogueDue,markDialogueDone,ratePersonalPhrase} from './personal.js';
 import {contextMarkup} from './context-view.js';
+import {appendAttempt,summarizeAttempts} from './learning-metrics.js';
 const KEY='say-it-progress-v1';
 const CONFLICT_MESSAGE='Прогресс изменился в другой вкладке. Эта вкладка не сохраняет новые действия, чтобы не стереть уже сохранённые занятия. При необходимости скачай резервную копию, затем обнови страницу.';
 const main=document.querySelector('#main');
 const lessonIds=new Set(lessons.map(x=>x.id)),cardIds=new Set(phraseMap.keys());
-let state=freshState(),storageWarning='',lastStoredRaw=null,storageConflict=false,lessonSession=null,reviewSession=null,quickSession=null,contextSession={reviewId:null,revealed:false},recorder=null,stream=null,recordedUrls=[],recordTimer=null,recordTick=null,recordPending=false,recordGeneration=0,soundRate=.88;
+let state=freshState(),storageWarning='',lastStoredRaw=null,storageConflict=false,lessonSession=null,reviewSession=null,quickSession=null,contextSession={reviewId:null,revealed:false},recorder=null,stream=null,recordedUrls=[],recordTimer=null,recordTick=null,recordPending=false,recordGeneration=0,soundRate=.88,personalDueTimer=null,todayDialogueDueCount=0;
 try{const saved=localStorage.getItem(KEY);lastStoredRaw=saved;if(saved)state=validateState(JSON.parse(saved),lessonIds,cardIds);}catch{storageWarning='Не удалось прочитать сохранение. Занятия доступны, но проверь настройки хранилища браузера и сохрани резервную копию.';}
 const esc=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const byId=id=>lessons.find(l=>l.id===id);
@@ -35,6 +36,17 @@ function save(){try{
 }catch{warnStorage('Браузер не сохраняет прогресс. Скачай резервную копию в разделе «Мой прогресс».');updateBadge();return false;}}
 function activity(){const key=localDate();state.activity[key]=Math.min(100000,(state.activity[key]||0)+1);}
 function updateBadge(){const course=dueCards(state.cards).length,personal=state.personalPhrases.filter(phrase=>phrase.reviews>0&&phrase.due<=Date.now()).length,count=course+personal;const badge=document.querySelector('#review-badge');badge.textContent=count;badge.dataset.empty=String(count===0);badge.closest('a').setAttribute('aria-label',`Повторение: ${course} ${ruCount(course,'учебная фраза','учебные фразы','учебных фраз')}, ${personal} ${ruCount(personal,'своя фраза','свои фразы','своих фраз')}`);}
+function schedulePersonalDueRefresh(){
+  clearTimeout(personalDueTimer);
+  const now=Date.now(),next=state.personalPhrases.filter(phrase=>phrase.reviews===0).map(phrase=>phrase.createdAt+DAY).filter(due=>due>now).sort((a,b)=>a-b)[0];
+  if(next===undefined)return;
+  personalDueTimer=setTimeout(()=>{
+    const route=(location.hash.replace(/^#/,'')||'today').split('/')[0];
+    if(route==='context')refreshContextAfterDue();
+    else if(route==='today')renderRoute();
+    else{updateBadge();schedulePersonalDueRefresh();}
+  },Math.min(2147483647,Math.max(1,next-now+50)));
+}
 function seedCards(lesson){for(const phrase of lesson.phrases)if(!state.cards[phrase.id])state.cards[phrase.id]={due:Date.now(),interval:0,reviews:0};}
 function addCards(lesson){const previous=JSON.stringify(state);seedCards(lesson);if(!save()){state=JSON.parse(previous);return false;}return true;}
 function sound(text){if(!('speechSynthesis' in window)){toast('Озвучка недоступна в этом браузере. Фразы можно читать и повторять вслух.');return;}speechSynthesis.cancel();const utterance=new SpeechSynthesisUtterance(text);utterance.lang='en-GB';utterance.rate=soundRate;const voices=speechSynthesis.getVoices();const voice=voices.find(v=>/^en-GB/i.test(v.lang))||voices.find(v=>/^en/i.test(v.lang));if(voice)utterance.voice=voice;utterance.onerror=event=>{if(!['interrupted','canceled'].includes(event.error))toast('Озвучка не запустилась. Проверь доступные английские голоса в настройках устройства.');};speechSynthesis.speak(utterance);}
@@ -43,7 +55,8 @@ function heading(title,description,withLevel=true){return `<div class="page-head
 function rows(items){return `<div class="lesson-list">${items.map((l,i)=>`<a class="lesson-row" href="#lesson/${l.id}"><span class="lesson-number ${state.completed[l.id]?'done':''}">${state.completed[l.id]?'✓':String(i+1).padStart(2,'0')}</span><div><h3>${esc(l.title)}</h3><p>${esc(l.goal)}</p></div><span class="row-end">${state.completed[l.id]?'Пройден':l.minutes+' мин'} &nbsp; ↗</span></a>`).join('')}</div>`;}
 function renderToday(){
   const focus=selectFocus(state,lessons),lesson=byId(focus.id),done=Object.keys(state.completed).length;
-  const due=dueCards(state.cards).length,personalDue=state.personalPhrases.filter(phrase=>phrase.reviews>0&&phrase.due<=Date.now()).length,spoken=Object.values(state.speaking).reduce((a,b)=>a+b,0);
+  const due=dueCards(state.cards).length,personalDue=state.personalPhrases.filter(phrase=>phrase.reviews>0&&phrase.due<=Date.now()).length,dialogueDue=state.personalPhrases.filter(phrase=>personalDialogueDue(phrase)).length,spoken=Object.values(state.speaking).reduce((a,b)=>a+b,0);
+  todayDialogueDueCount=dialogueDue;
   const lead=focus.reason==='due'?'Время вспомнить знакомый ответ':focus.reason==='start'?'Первый ответ уже сегодня':focus.reason==='repeat'?'Закрепи знакомую ситуацию':'Следующая ситуация для речи';
   const resume=state.lessonDraft&&byId(state.lessonDraft.id)?`<section class="panel quick-due"><p class="eyebrow">НЕЗАКОНЧЕННЫЙ УРОК</p><h2>${esc(byId(state.lessonDraft.id).title)}</h2><p>Шаг ${state.lessonDraft.step+1} из 5 сохранён.</p><a class="btn outline" href="#lesson/${esc(state.lessonDraft.id)}">Продолжить урок →</a></section>`:'';
   const quickResume=state.quickDraft&&byId(state.quickDraft.id)?`<section class="panel quick-due"><p class="eyebrow">НЕЗАКОНЧЕННАЯ ПРАКТИКА</p><h2>${esc(byId(state.quickDraft.id).title)}</h2><p>Шаг ${state.quickDraft.step+1} из ${quickSteps(state.quickDraft.mode,state.quickDraft.reviewFirst).length} сохранён.</p><a class="btn outline" href="#quick/${esc(state.quickDraft.id)}/${state.quickDraft.mode}">Продолжить ответ →</a></section>`:'';
@@ -61,9 +74,10 @@ function renderToday(){
       <p class="muted">${due?`Сначала вспомни ${due} ${ruCount(due,'фразу','фразы','фраз')} из прошлых занятий.`:'Начни с одной фразы и личного ответа.'}</p>
       ${due?'<a class="btn outline" href="#review">Повторить по памяти ↗</a>':'<p class="note">После попытки фразы появятся в повторении.</p>'}
       ${personalDue?`<p class="note">Из твоих материалов ждут повторения ${personalDue} ${ruCount(personalDue,'фраза','фразы','фраз')}.</p><a class="text-link" href="#context">Вспомнить свои фразы ↗</a>`:''}
+      ${dialogueDue?`<p class="note">Пора использовать ${dialogueDue} ${ruCount(dialogueDue,'свою фразу','свои фразы','своих фраз')} в диалоге.</p><a class="text-link" href="#context">Открыть задание для диалога ↗</a>`:''}
       </section></div>${quickResume}${resume}
       <div class="stats"><div class="stat"><strong>${Object.values(state.practice).filter(x=>x.independent>0).length}</strong><span>Ситуаций с ответом без текста*</span></div>
-      <div class="stat"><strong>${due+personalDue}</strong><span>Фраз к повторению</span></div><div class="stat"><strong>${done}<small> / ${lessons.length}</small></strong><span>Уроков пройдено</span></div></div>
+      <div class="stat"><strong>${due+personalDue+dialogueDue}</strong><span>Фраз к повторению и диалогу</span></div><div class="stat"><strong>${done}<small> / ${lessons.length}</small></strong><span>Уроков пройдено</span></div></div>
       <p class="note">*По твоей самооценке, это не проверка уровня или произношения. Устных практик отмечено: ${spoken}.</p>
       <div class="section-head"><h2>Ближайшие темы · ${state.level}</h2><a class="text-link" href="#path">Вся программа ↗</a></div>
       ${rows(atLevel().filter(l=>!state.completed[l.id]).slice(0,3).length?atLevel().filter(l=>!state.completed[l.id]).slice(0,3):atLevel().slice(0,3))}
@@ -81,13 +95,14 @@ function renderQuick(id,rawMode){
   }
   main.innerHTML=heading('Говори с первой минуты','Один разговор, несколько попыток и повторение после паузы.',false)
     +quickMarkup(lesson,quickSession,soundRate,state.practice[lesson.id]?.due||Date.now());
+  if(quickSession.steps[quickSession.step]==='recall'&&quickSession.recallStartedAt===undefined)quickSession.recallStartedAt=performance.now();
   renderRecordedUrls();
   main.querySelector('.quick-panel')?.scrollIntoView({block:'start'});
 }
 function saveQuickDraft(){
   if(!quickSession)return false;
-  const {id,mode,step,hint,hintUsed,written,reviewFirst,retrievalRating}=quickSession;
-  state.quickDraft=quickSession.completed?null:{id,mode,step,hint,hintUsed,written,reviewFirst,retrievalRating};
+  const {id,mode,step,hint,hintUsed,written,reviewFirst,retrievalRating,retrievalRatedAt,transferRating}=quickSession;
+  state.quickDraft=quickSession.completed?null:{id,mode,step,hint,hintUsed,written,reviewFirst,retrievalRating,retrievalRatedAt,transferRating};
   return save();
 }
 function renderRecordedUrls(){
@@ -101,9 +116,37 @@ function renderContext(){
   if(contextSession.reviewId!==due?.id)contextSession={reviewId:due?.id||null,revealed:false};
   main.innerHTML=heading('Фразы из твоего материала','Возьми полезные выражения из видео или текста, используй их в диалоге и вспомни позже.',false)
     +contextMarkup(state.personalPhrases,contextSession);
+  schedulePersonalDueRefresh();
+}
+function refreshContextAfterDue(){
+  const ids=['context-source','context-source-url','context-lines'];
+  const values=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)?.value??'']));
+  const focused=document.activeElement,focusedId=ids.includes(focused?.id)?focused.id:null;
+  const selection=focusedId&&Number.isInteger(focused.selectionStart)?[focused.selectionStart,focused.selectionEnd]:null;
+  const checked=document.getElementById('context-spoken')?.checked,doneId=document.getElementById('context-done')?.dataset.id,scrollY=window.scrollY;
+  renderContext();
+  for(const id of ids){const input=document.getElementById(id);if(input)input.value=values[id];}
+  if(checked&&doneId===document.getElementById('context-done')?.dataset.id&&document.getElementById('context-spoken')&&!document.getElementById('context-spoken').disabled){
+    document.getElementById('context-spoken').checked=true;
+    document.getElementById('context-done').disabled=false;
+  }
+  if(focusedId){const input=document.getElementById(focusedId);input?.focus({preventScroll:true});if(selection)input?.setSelectionRange(...selection);}
+  window.scrollTo(0,scrollY);updateBadge();
 }
 function focusQuickStage(){document.querySelector('.quick-panel')?.focus({preventScroll:true});}
 function focusContextStage(selector){const stage=document.querySelector(selector)||document.querySelector('.context-card');stage?.focus({preventScroll:true});stage?.scrollIntoView({block:'start'});}
+function captureAnswerTime(session){
+  if(session.answerElapsedSeconds!==undefined)return;
+  const elapsed=Number.isFinite(session.recallStartedAt)?performance.now()-session.recallStartedAt:NaN;
+  session.answerElapsedSeconds=Number.isFinite(elapsed)&&elapsed>=0&&elapsed<=300000?Math.max(1,Math.round(elapsed/1000)):null;
+}
+function renderLearningMetrics(){
+  const metrics=summarizeAttempts(state.attempts,state.practice);
+  const fraction=result=>result.total?`${result.independent} из ${result.total} (${Math.round(result.rate*100)}%)`:'Пока нет попыток';
+  main.querySelector('.stats')?.insertAdjacentHTML('afterend',`<section class="panel"><p class="eyebrow">САМОПРОВЕРКА В РЕЧИ</p><h2>Что получается без подсказки</h2>
+    <div class="stats"><div class="stat"><strong>${fraction(metrics.delayedRecall)}</strong><span>Вспомнил спустя 48 часов</span></div><div class="stat"><strong>${fraction(metrics.transfer)}</strong><span>Ответил на дополнительные реплики</span></div><div class="stat"><strong>${metrics.medianResponseSeconds===null?'—':metrics.medianResponseSeconds+' с'}</strong><span>Медиана времени до отметки об ответе</span></div><div class="stat"><strong>${metrics.overdueCount}</strong><span>Ситуаций ждут повторения</span></div></div>
+    <p class="note">Это личная история самооценок во встроенных ситуациях. Время отсчитывается от появления вопроса до отметки об ответе; неудачные попытки исключены. Дополнительные реплики могут стать знакомыми при повторении. Сайт не проверяет речь, не подтверждает уровень и не доказывает ускорение обучения; для этого нужны одинаковые задания и оценка независимым человеком.</p></section>`);
+}
 function renderCapabilities(){
   const entries=Object.entries(state.practice).map(([id,practice])=>({lesson:byId(id),practice})).filter(x=>x.lesson);
   const body=entries.length?entries.map(({lesson,practice})=>`<div class="vocab-row"><div><strong>${esc(lesson.title)}</strong><small>${practice.independent?'Без текста · по самооценке':practice.assisted?'С подсказкой · по самооценке':'Попытка · по самооценке'}</small></div><span class="muted">${practice.due<=Date.now()?'Пора повторить':'Повтор позже'}</span></div>`).join(''):'<p class="muted">После первой короткой практики здесь появятся ситуации, в которых ты пробовал отвечать.</p>';
@@ -220,7 +263,7 @@ function cleanupRecording(){
 }
 function renderProgress(){const done=Object.keys(state.completed).length,spoke=Object.values(state.speaking).reduce((a,b)=>a+b,0);const days=Array.from({length:28},(_,i)=>{const d=new Date();d.setDate(d.getDate()-27+i);const key=localDate(d);return `<div class="day ${state.activity[key]?'active':''}" title="${key}: ${state.activity[key]||0} действий" aria-label="${key}: ${state.activity[key]||0} действий"></div>`;}).join('');main.innerHTML=heading('Ты уже двигаешься.','Следи за практикой, а не за идеальностью каждого ответа.',false)+`<div class="stats"><div class="stat"><strong>${done}<small> / 42</small></strong><span>Пройдено уроков</span></div><div class="stat"><strong>${Object.keys(state.cards).length}</strong><span>Фраз в повторении</span></div><div class="stat"><strong>${spoke}</strong><span>Устных практик</span></div></div><section class="panel"><div class="section-head"><h2>Последние 28 дней</h2><span class="muted">Серия: ${streak(state.activity)} дн.</span></div><div class="activity-grid">${days}</div><small>Цвет отмечает дни, когда ты отвечал на задания, повторял фразы или сохранял устную практику.</small></section><section class="panel"><h2>По этапам</h2>${levels.map(l=>{const count=lessons.filter(x=>x.level===l.id&&state.completed[x.id]).length;return `<div style="margin:18px 0"><div class="section-head" style="margin-bottom:4px"><span>${l.id} · ${l.title}</span><span class="muted">${count}/6</span></div><div class="progress-track"><span style="width:${percent(count,6)}%"></span></div></div>`;}).join('')}<p class="note">Здесь показано прохождение материала. Оценить владение языком помогут отдельная диагностика и обратная связь преподавателя или собеседника.</p></section><section class="panel"><h2>Заниматься самостоятельно</h2><p>Начни с ${state.goal} минут: повтори фразы, пройди часть урока и обязательно скажи несколько предложений вслух. Добавляй чтение, аудирование и живой разговор в течение недели.</p><label class="form-line">План на день <select id="goal-select">${[10,20,30].map(n=>`<option value="${n}" ${state.goal===n?'selected':''}>${n} минут</option>`).join('')}</select></label><div class="resource-list"><div><a href="https://learnenglish.britishcouncil.org/free-resources/speaking" target="_blank" rel="noopener noreferrer">British Council · разговорная практика ↗</a><small>Бесплатные материалы A1–B2 с видео и заданиями.</small></div><div><a href="https://www.coe.int/en/web/common-european-framework-reference-languages/level-descriptions" target="_blank" rel="noopener noreferrer">CEFR · ориентиры A1–C2 ↗</a><small>Официальная шкала навыков от Совета Европы.</small></div></div></section><section class="panel"><h2>Твои данные</h2><p class="note">Прогресс хранится в этом браузере. Другой браузер или адрес сайта — отдельное сохранение. Для переноса скачай копию и загрузи её на другом устройстве. Аудиозаписи в копию не входят.</p><div class="btn-row"><button class="btn" data-action="export">Скачать резервную копию</button><button class="btn quiet" data-action="import">Загрузить копию</button><input class="hidden" id="import-file" type="file" accept="application/json,.json"><button class="btn danger" data-action="reset">Сбросить прогресс</button></div></section>`;}
 function downloadBackup(){const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`say-it-backup-${localDate()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Резервная копия подготовлена.');}
-async function importBackup(file){if(!file)return;try{if(file.size>2*1024*1024)throw new Error('Файл слишком большой. Максимум 2 МБ.');const imported=validateState(JSON.parse(await file.text()),lessonIds,cardIds);if(!confirm('Заменить текущий прогресс данными из резервной копии?'))return;const previous=state;state=imported;lessonSession=null;reviewSession=null;quickSession=null;if(!save()){state=previous;renderRoute();return;}renderRoute();toast('Прогресс восстановлен.');}catch(error){toast('Не удалось загрузить копию: '+error.message);}}
+async function importBackup(file){if(!file)return;try{if(file.size>6*1024*1024)throw new Error('Файл слишком большой. Максимум 6 МБ.');const imported=validateState(JSON.parse(await file.text()),lessonIds,cardIds);if(!confirm('Заменить текущий прогресс данными из резервной копии?'))return;const previous=state;state=imported;lessonSession=null;reviewSession=null;quickSession=null;if(!save()){state=previous;renderRoute();return;}renderRoute();toast('Прогресс восстановлен.');}catch(error){toast('Не удалось загрузить копию: '+error.message);}}
 function renderRoute(){
   const [route='today',id,mode]=(location.hash.replace(/^#/,'')||'today').split('/');
   cleanupRecording();
@@ -237,10 +280,10 @@ function renderRoute(){
   else if(route==='speak')renderSpeak(id);
   else if(route==='quick')renderQuick(id,mode);
   else if(route==='context')renderContext();
-  else if(route==='progress'){renderProgress();renderCapabilities();}
+  else if(route==='progress'){renderProgress();renderCapabilities();renderLearningMetrics();}
   else renderToday();
   if(storageWarning)main.insertAdjacentHTML('afterbegin',`<p class="feedback wrong" id="storage-warning" role="alert">${esc(storageWarning)}</p>`);
-  updateBadge();revealCurrentLevel();main.focus({preventScroll:true});window.scrollTo(0,0);
+  updateBadge();schedulePersonalDueRefresh();revealCurrentLevel();main.focus({preventScroll:true});window.scrollTo(0,0);
 }
 document.addEventListener('click',event=>{if(event.target.closest('.skip')){event.preventDefault();main.focus();return;}const b=event.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action;if(blockedByConflict(action))return;switch(action){case 'sound':sound(b.dataset.text);break;case 'level':if(LEVEL_IDS.includes(b.dataset.id)){const previous=state.level;state.level=b.dataset.id;if(!save())state.level=previous;renderRoute();}break;case 'save-phrases':if(addCards(byId(b.dataset.id)))toast('Фразы добавлены в повторение.');break;case 'lesson-next':if(!lessonSession)return;if(lessonSession.step>0&&!lessonSession.answered)return;const beforeStep=lessonSession.step,beforeAnswered=lessonSession.answered,beforeSelected=lessonSession.selected,beforeDraft=state.lessonDraft;lessonSession.step++;lessonSession.answered=false;lessonSession.selected=null;if(!saveLessonDraft()){lessonSession.step=beforeStep;lessonSession.answered=beforeAnswered;lessonSession.selected=beforeSelected;state.lessonDraft=beforeDraft;return;}renderLesson();focusLessonStep();break;case 'choose':lessonSession.selected=Number(b.dataset.index);renderLessonStage();document.querySelector(`[data-action="choose"][data-index="${b.dataset.index}"]`)?.focus();break;case 'token-add':{const idx=Number(b.dataset.index);if(!lessonSession.tokens.includes(idx))lessonSession.tokens.push(idx);renderLessonStage();break;}case 'token-remove':lessonSession.tokens.splice(Number(b.dataset.index),1);renderLessonStage();break;case 'check':check();break;case 'lesson-finish':finishLesson();break;case 'lesson-retry':{const previousSession=lessonSession,previousDraft=state.lessonDraft,id=lessonSession.id,lesson=byId(id);lessonSession={id,step:1,score:0,answered:false,selected:null,tokens:[],bank:shuffle(lesson.sentence.split(' ')),options:shuffle(lesson.quiz.options),speechDone:false};if(!saveLessonDraft()){lessonSession=previousSession;state.lessonDraft=previousDraft;return;}renderLesson();focusLessonStep();break;}case 'reveal':reviewSession.revealed=true;renderReview();break;case 'rate':{const r=reviewSession;if(!r?.revealed)return;const beforeState=JSON.stringify(state),id=r.ids[r.index];state.cards[id]=scheduleCard(state.cards[id],b.dataset.grade);activity();if(!save()){state=JSON.parse(beforeState);return;}r.index++;r.done++;r.revealed=false;renderReview();break;}case 'seed-cards':{const beforeState=JSON.stringify(state);for(const l of atLevel())seedCards(l);if(!save()){state=JSON.parse(beforeState);return;}reviewSession=null;renderReview();break;}case 'record':void toggleRecord();break;case 'speaking-done':{if(![...document.querySelectorAll('.speak-check')].every(c=>c.checked))return;const beforeState=JSON.stringify(state),id=b.dataset.id;state.speaking[id]=Math.min(100000,(state.speaking[id]||0)+1);activity();if(!save()){state=JSON.parse(beforeState);return;}b.disabled=true;b.textContent='Практика сохранена ✓';b.dataset.saved='true';toast('Устная практика сохранена.');break;}case 'export':downloadBackup();break;case 'import':document.querySelector('#import-file').click();break;case 'reset':if(confirm('Удалить все уроки, карточки и историю на этом устройстве? Сначала можно скачать резервную копию.')){const previous=state;state=freshState();reviewSession=null;lessonSession=null;quickSession=null;if(!save()){state=previous;renderRoute();return;}renderRoute();toast('Прогресс сброшен.');}break;}});
 document.addEventListener('click',event=>{
@@ -264,15 +307,27 @@ document.addEventListener('click',event=>{
     if(!quickSession?.reviewFirst||quickSession.steps[quickSession.step]!=='recall')return;
     const rating=button.dataset.rating;
     if(!['independent','assisted','again'].includes(rating)||quickSession.hintUsed&&quickSession.retrievalRating||rating==='independent'&&quickSession.hintUsed)return;
-    const beforeDraft=state.quickDraft,previousRating=quickSession.retrievalRating;
-    quickSession.retrievalRating=rating;if(!saveQuickDraft()){quickSession.retrievalRating=previousRating;state.quickDraft=beforeDraft;return;}
+    const beforeDraft=state.quickDraft,previousRating=quickSession.retrievalRating,previousRatedAt=quickSession.retrievalRatedAt;
+    quickSession.retrievalRating=rating;quickSession.retrievalRatedAt??=Date.now();
+    if(!saveQuickDraft()){quickSession.retrievalRating=previousRating;quickSession.retrievalRatedAt=previousRatedAt;state.quickDraft=beforeDraft;return;}
+    captureAnswerTime(quickSession);
     document.querySelectorAll('[data-action="quick-initial-rate"]').forEach(el=>el.setAttribute('aria-pressed',String(el===button)));
+    const next=document.querySelector('[data-action="quick-next"]');if(next)next.disabled=false;
+  }else if(action==='quick-transfer-rate'){
+    if(!quickSession||quickSession.steps[quickSession.step]!=='followup')return;
+    const rating=button.dataset.rating;
+    if(!['independent','assisted','again'].includes(rating))return;
+    const beforeDraft=state.quickDraft,previousRating=quickSession.transferRating;
+    quickSession.transferRating=rating;
+    if(!saveQuickDraft()){quickSession.transferRating=previousRating;state.quickDraft=beforeDraft;return;}
+    document.querySelectorAll('[data-action="quick-transfer-rate"]').forEach(el=>el.setAttribute('aria-pressed',String(el===button)));
     const next=document.querySelector('[data-action="quick-next"]');if(next)next.disabled=false;
   }else if(action==='quick-next'){
     if(!quickSession||quickSession.completed)return;
     const current=quickSession.steps[quickSession.step];
     if(recorder?.state==='recording'){toast('Останови запись перед переходом к следующему шагу.');return;}
     if(current==='recall'&&quickSession.reviewFirst&&!quickSession.retrievalRating){toast('Сначала оцени первую попытку без образца.');return;}
+    if(current==='followup'&&!quickSession.transferRating){toast('Сначала оцени ответ в новых репликах диалога.');return;}
     if(current==='write'){
       const answer=document.querySelector('#quick-written')?.value.trim()||'';
       if(answer.split(/\s+/).length<3){toast('Напиши хотя бы три слова по-английски или выбери режим на 2 минуты.');return;}
@@ -281,14 +336,21 @@ document.addEventListener('click',event=>{
     const beforeDraft=state.quickDraft,previousStep=quickSession.step;
     quickSession.step=Math.min(quickSession.step+1,quickSession.steps.length-1);
     if(!saveQuickDraft()){quickSession.step=previousStep;state.quickDraft=beforeDraft;return;}
+    if(current==='recall'&&!quickSession.reviewFirst)captureAnswerTime(quickSession);
     renderQuick(quickSession.id,quickSession.mode);focusQuickStage();
   }else if(action==='quick-rate'){
     if(!quickSession||quickSession.completed||quickSession.steps[quickSession.step]!=='rate')return;
     const rating=quickSession.reviewFirst?quickSession.retrievalRating:button.dataset.rating;
     if(!['independent','assisted','again'].includes(rating)||!quickSession.reviewFirst&&rating==='independent'&&quickSession.hintUsed)return;
+    if(quickSession.mode===10&&!['independent','assisted','again'].includes(quickSession.transferRating))return;
     const lesson=byId(quickSession.id);
     const previous=JSON.stringify(state);
-    state.practice[lesson.id]=recordPractice(state.practice[lesson.id],rating);
+    const now=Date.now(),priorPractice=state.practice[lesson.id];
+    const recallAt=quickSession.reviewFirst&&priorPractice&&Number.isFinite(quickSession.retrievalRatedAt)&&quickSession.retrievalRatedAt>=priorPractice.lastAt&&quickSession.retrievalRatedAt<=now?quickSession.retrievalRatedAt:null;
+    const delayHours=recallAt===null?null:Math.min(87600,Math.floor((recallAt-priorPractice.lastAt)/3600000));
+    state.practice[lesson.id]=recordPractice(priorPractice,rating,now);
+    state.attempts=appendAttempt(state.attempts,{id:lesson.id,at:recallAt??now,kind:quickSession.reviewFirst?'review':'new',rating,elapsedSeconds:quickSession.answerElapsedSeconds??null,delayHours});
+    if(quickSession.mode===10)state.attempts=appendAttempt(state.attempts,{id:lesson.id,at:now,kind:'transfer',rating:quickSession.transferRating,elapsedSeconds:null,delayHours:null});
     state.speaking[lesson.id]=Math.min(100000,(state.speaking[lesson.id]||0)+1);
     activity();for(const phrase of lesson.phrases)if(!state.cards[phrase.id])state.cards[phrase.id]={due:Date.now(),interval:0,reviews:0};state.quickDraft=null;
     if(!save()){state=JSON.parse(previous);updateBadge();return;}
@@ -306,8 +368,9 @@ document.addEventListener('click',event=>{
   if(blockedByConflict(action))return;
   if(action==='context-add'){
     const source=document.querySelector('#context-source')?.value||'';
+    const sourceUrl=document.querySelector('#context-source-url')?.value||'';
     const input=document.querySelector('#context-lines')?.value||'';
-    const parsed=parsePersonalPhrases(source,input,new Set(state.personalPhrases.map(phrase=>phrase.id)));
+    const parsed=parsePersonalPhrases(source,input,new Set(state.personalPhrases.map(phrase=>phrase.id)),Date.now(),sourceUrl);
     if(parsed.errors.length){toast(parsed.errors[0]);return;}
     const previous=JSON.stringify(state);state.personalPhrases.push(...parsed.phrases);
     if(!save()){state=JSON.parse(previous);return;}renderContext();focusContextStage('.context-dialogue');toast(`Добавлено фраз: ${parsed.phrases.length}.`);
@@ -321,7 +384,8 @@ document.addEventListener('click',event=>{
     const selected=state.personalPhrases.find(phrase=>phrase.id===button.dataset.id);
     if(!selected)return;
     const now=Date.now();
-    const groupIds=new Set(state.personalPhrases.filter(phrase=>phrase.reviews===0&&phrase.source===selected.source).slice(0,MAX_PHRASES_PER_ADD).map(phrase=>phrase.id));
+    if(!personalDialogueDue(selected,now))return;
+    const groupIds=new Set(state.personalPhrases.filter(phrase=>personalDialogueDue(phrase,now)&&phrase.source===selected.source&&phrase.sourceUrl===selected.sourceUrl&&phrase.createdAt===selected.createdAt).slice(0,MAX_PHRASES_PER_ADD).map(phrase=>phrase.id));
     const previous=JSON.stringify(state);state.personalPhrases=state.personalPhrases.map(phrase=>groupIds.has(phrase.id)?markDialogueDone(phrase,now):phrase);
     activity();if(!save()){state=JSON.parse(previous);return;}renderContext();focusContextStage('.context-future');toast('Возвращение к материалу назначено через два дня.');
   }else if(action==='context-reveal'){
@@ -353,9 +417,16 @@ document.addEventListener('input',event=>{
     quickSession.written=event.target.value.slice(0,1200);saveQuickDraft();
   }
 });
-document.addEventListener('change',event=>{const el=event.target;if(['level-select','goal-select','import-file'].includes(el.id)&&blockedByConflict(el.id)){if(el.id!=='import-file')renderRoute();return;}if(el.id==='level-select'){const previous=state.level;state.level=el.value;if(!save())state.level=previous;renderRoute();}else if(el.id==='goal-select'){const previous=state.goal;state.goal=Number(el.value);if(!save())state.goal=previous;renderProgress();}else if(el.id==='lesson-spoken'){document.querySelector('#finish-lesson').disabled=!el.checked||lessonSession.score<2;}else if(el.classList.contains('speak-check')){const b=document.querySelector('#speaking-done');b.disabled=b.dataset.saved==='true'||![...document.querySelectorAll('.speak-check')].every(x=>x.checked);}else if(el.id==='speak-topic'){location.hash='speak/'+el.value;}else if(el.id==='import-file'){void importBackup(el.files[0]);}});
+document.addEventListener('change',event=>{const el=event.target;if(['level-select','goal-select','import-file'].includes(el.id)&&blockedByConflict(el.id)){if(el.id!=='import-file')renderRoute();return;}if(el.id==='level-select'){const previous=state.level;state.level=el.value;if(!save())state.level=previous;renderRoute();}else if(el.id==='goal-select'){const previous=state.goal;state.goal=Number(el.value);if(!save())state.goal=previous;renderProgress();renderCapabilities();renderLearningMetrics();}else if(el.id==='lesson-spoken'){document.querySelector('#finish-lesson').disabled=!el.checked||lessonSession.score<2;}else if(el.classList.contains('speak-check')){const b=document.querySelector('#speaking-done');b.disabled=b.dataset.saved==='true'||![...document.querySelectorAll('.speak-check')].every(x=>x.checked);}else if(el.id==='speak-topic'){location.hash='speak/'+el.value;}else if(el.id==='import-file'){void importBackup(el.files[0]);}});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id==='answer-input'){e.preventDefault();if(!blockedByConflict('check'))check();}});
 window.addEventListener('hashchange',renderRoute);window.addEventListener('pagehide',cleanupRecording);window.addEventListener('storage',event=>{if(event.key===KEY&&event.newValue!==lastStoredRaw){storageConflict=true;warnStorage(CONFLICT_MESSAGE);}});
+document.addEventListener('visibilitychange',()=>{
+  if(quickSession?.steps[quickSession.step]==='recall'&&quickSession.answerElapsedSeconds===undefined)quickSession.recallStartedAt=document.visibilityState==='visible'?performance.now():null;
+  if(document.visibilityState!=='visible')return;
+  const route=(location.hash.replace(/^#/,'')||'today').split('/')[0];
+  if(route==='context'&&state.personalPhrases.some(phrase=>personalDialogueDue(phrase))&&document.querySelector('#context-spoken')?.disabled)refreshContextAfterDue();
+  else if(route==='today'&&state.personalPhrases.filter(phrase=>personalDialogueDue(phrase)).length!==todayDialogueDueCount)renderRoute();
+});
 function revealCurrentLevel(){const tabs=document.querySelector('.level-tabs');const active=tabs?.querySelector('.active');if(active)tabs.scrollLeft=Math.max(0,active.offsetLeft-tabs.offsetLeft-(tabs.clientWidth-active.offsetWidth)/2);}
 // Keep the next question visible after advancing from a long lesson on a phone.
 function focusLessonStep(){const stage=document.querySelector('#lesson-stage');if(!stage)return;stage.focus({preventScroll:true});const target=matchMedia('(max-width:1080px)').matches?document.querySelector('.lesson-mobile-progress'):stage;(target||stage).scrollIntoView({block:'start'});}

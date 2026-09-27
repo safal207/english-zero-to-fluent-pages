@@ -5,8 +5,8 @@ export const QUICK_MODES = [2, 5, 10];
 export function quickSteps(mode, reviewFirst = false) {
   const minutes = QUICK_MODES.includes(Number(mode)) ? Number(mode) : 2;
   return reviewFirst
-    ? ['recall', 'listen', 'repeat', ...(minutes >= 5 ? ['write'] : []), ...(minutes >= 10 ? ['transfer'] : []), 'rate']
-    : ['listen', 'repeat', 'recall', ...(minutes >= 5 ? ['write'] : []), ...(minutes >= 10 ? ['transfer'] : []), 'rate'];
+    ? ['recall', 'listen', 'repeat', ...(minutes >= 5 ? ['write'] : []), ...(minutes >= 10 ? ['transfer', 'followup'] : []), 'rate']
+    : ['listen', 'repeat', 'recall', ...(minutes >= 5 ? ['write'] : []), ...(minutes >= 10 ? ['transfer', 'followup'] : []), 'rate'];
 }
 
 export function resumeQuickSession(id, mode, source = null, due = false) {
@@ -33,6 +33,8 @@ export function resumeQuickSession(id, mode, source = null, due = false) {
     written: source?.written ?? '',
     reviewFirst,
     retrievalRating: sameOrder ? source.retrievalRating : null,
+    retrievalRatedAt: sameOrder ? source.retrievalRatedAt ?? null : null,
+    transferRating: sameOrder ? source.transferRating ?? null : null,
     completed: false,
     rating: null
   };
