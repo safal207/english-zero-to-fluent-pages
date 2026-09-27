@@ -1,7 +1,7 @@
 export const LEVEL_IDS=['A0','A1','A2','B1','B2','C1','C2'];
 export const DAY=86400000;
 export const MAX_PERSONAL_PHRASES=2000;
-export const freshState=()=>({version:1,level:'A0',completed:{},cards:{},activity:{},speaking:{},goal:20,lessonDraft:null,practice:{},personalPhrases:[]});
+export const freshState=()=>({version:1,level:'A0',completed:{},cards:{},activity:{},speaking:{},goal:20,lessonDraft:null,quickDraft:null,practice:{},personalPhrases:[]});
 export function localDate(date=new Date()){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;}
 export function normalize(text){return String(text).normalize('NFKC').toLowerCase().replace(/[’‘]/g,"'").replace(/[^\p{L}\p{N}'\s]/gu,'').replace(/\s+/g,' ').trim();}
 export function correctAnswer(input,accepted){return accepted.some(answer=>normalize(input)===normalize(answer));}
@@ -30,6 +30,17 @@ export function validateState(raw,lessonIds,cardIds){
   for(const [id,n]of Object.entries(raw.speaking))if(lessonIds.has(id)&&integer(n,1,100000))next.speaking[id]=n;
   const draft=raw.lessonDraft;
   if(record(draft)&&lessonIds.has(draft.id)&&integer(draft.step,0,4)&&integer(draft.score,0,3))next.lessonDraft={id:draft.id,step:draft.step,score:draft.score};
+  const quickDraft=raw.quickDraft;
+  const quickKeys=['id','mode','step','hint','hintUsed','written','reviewFirst','retrievalRating'];
+  if(record(quickDraft)&&Object.keys(quickDraft).length===quickKeys.length&&quickKeys.every(key=>Object.hasOwn(quickDraft,key))&&
+    lessonIds.has(quickDraft.id)&&[2,5,10].includes(quickDraft.mode)&&
+    integer(quickDraft.step,0,quickDraft.mode===2?3:quickDraft.mode===5?4:5)&&
+    typeof quickDraft.hint==='boolean'&&typeof quickDraft.hintUsed==='boolean'&&
+    typeof quickDraft.written==='string'&&quickDraft.written.length<=1200&&
+    typeof quickDraft.reviewFirst==='boolean'&&
+    (quickDraft.retrievalRating===null||['independent','assisted','again'].includes(quickDraft.retrievalRating))){
+    next.quickDraft={id:quickDraft.id,mode:quickDraft.mode,step:quickDraft.step,hint:quickDraft.hint,hintUsed:quickDraft.hintUsed,written:quickDraft.written,reviewFirst:quickDraft.reviewFirst,retrievalRating:quickDraft.retrievalRating};
+  }
   if(record(raw.practice))for(const [id,entry]of Object.entries(raw.practice)){
     if(lessonIds.has(id)&&record(entry)&&timestamp(entry.due)&&integer(entry.interval,0,60)&&integer(entry.reviews,0,100000)&&integer(entry.assisted,0,100000)&&integer(entry.independent,0,100000)&&timestamp(entry.lastAt)&&(entry.firstIndependentAt===null||timestamp(entry.firstIndependentAt))){
       next.practice[id]={due:entry.due,interval:entry.interval,reviews:entry.reviews,assisted:entry.assisted,independent:entry.independent,lastAt:entry.lastAt,firstIndependentAt:entry.firstIndependentAt};
